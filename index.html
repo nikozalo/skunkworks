@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Road Racer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; color: #fff; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+  #map { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+  #game-canvas { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 2; display: none; }
+  #ui-overlay {
+    position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+    z-index: 10; pointer-events: none;
+  }
+  #ui-overlay > * { pointer-events: auto; }
+  #instructions {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.8); padding: 12px 24px; border-radius: 8px;
+    font-size: 15px; text-align: center; max-width: 500px;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  #hud {
+    position: absolute; top: 16px; left: 16px;
+    background: rgba(0,0,0,0.8); padding: 12px 20px; border-radius: 8px;
+    font-size: 14px; display: none; border: 1px solid rgba(255,255,255,0.15);
+    line-height: 1.8;
+  }
+  #hud .speed { font-size: 28px; font-weight: bold; color: #0f0; }
+  #hud .label { color: #999; font-size: 12px; text-transform: uppercase; }
+  #start-race-btn {
+    position: absolute; bottom: 32px; left: 50%; transform: translateX(-50%);
+    background: #e63946; color: #fff; border: none; padding: 14px 40px;
+    border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer;
+    display: none; transition: background 0.2s;
+  }
+  #start-race-btn:hover { background: #c1121f; }
+  #reset-btn {
+    position: absolute; top: 16px; right: 16px;
+    background: rgba(255,255,255,0.15); color: #fff; border: none;
+    padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;
+    display: none;
+  }
+  #reset-btn:hover { background: rgba(255,255,255,0.25); }
+  #finish-screen {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.9); padding: 40px 60px; border-radius: 16px;
+    text-align: center; display: none; border: 2px solid #e63946;
+  }
+  #finish-screen h1 { font-size: 36px; margin-bottom: 8px; }
+  #finish-screen .time { font-size: 48px; color: #0f0; font-weight: bold; margin: 12px 0; }
+  #finish-screen button {
+    background: #e63946; color: #fff; border: none; padding: 12px 32px;
+    border-radius: 8px; font-size: 16px; cursor: pointer; margin-top: 16px;
+  }
+  .marker-start { background: #22c55e; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; }
+  .marker-end { background: #e63946; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; }
+  #minimap {
+    position: absolute; bottom: 16px; right: 16px; width: 180px; height: 180px;
+    background: rgba(0,0,0,0.7); border-radius: 8px; display: none;
+    border: 1px solid rgba(255,255,255,0.2); overflow: hidden;
+  }
+  #minimap canvas { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<canvas id="game-canvas"></canvas>
+
+<div id="ui-overlay">
+  <div id="instructions">
+    <strong>Road Racer</strong><br>
+    Click on the map to set a <span style="color:#22c55e">start point</span>,
+    then click again for an <span style="color:#e63946">end point</span>.
+    The roads between them become your race track!
+  </div>
+  <div id="hud">
+    <div class="label">Speed</div>
+    <div class="speed">0 <span style="font-size:14px;color:#999">km/h</span></div>
+    <div class="label" style="margin-top:8px">Time</div>
+    <div class="time-display" style="font-size:22px; font-weight:bold;">0:00.0</div>
+    <div class="label" style="margin-top:8px">Progress</div>
+    <div class="progress-display" style="font-size:16px;">0%</div>
+  </div>
+  <button id="start-race-btn">START RACE</button>
+  <button id="reset-btn">Reset</button>
+  <div id="finish-screen">
+    <h1>Finish!</h1>
+    <div class="time">0:00.0</div>
+    <button onclick="resetGame()">Race Again</button>
+  </div>
+  <div id="minimap"><canvas></canvas></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ==================== STATE ====================
+let state = 'picking'; // picking | ready | racing | finished
+let startPoint = null;
+let endPoint = null;
+let routeCoords = []; // [lat, lng] from OSRM
+let trackPoints = [];  // [{x, y}] in game world (meters)
+let routeLine = null;
+let startMarker = null;
+let endMarker = null;
+
+// Car state
+const car = {
+  x: 0, y: 0, angle: 0,
+  speed: 0, steer: 0,
+  width: 4, length: 8
+};
+
+const keys = {};
+let raceStartTime = 0;
+let raceTime = 0;
+let carProgress = 0; // index along trackPoints
+
+// ==================== MAP SETUP ====================
+const map = L.map('map', { zoomControl: true }).setView([40.7128, -74.006], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// ==================== MAP CLICK ====================
+map.on('click', (e) => {
+  if (state !== 'picking') return;
+
+  if (!startPoint) {
+    startPoint = e.latlng;
+    startMarker = L.marker(e.latlng, {
+      icon: L.divIcon({ className: 'marker-start', iconSize: [14, 14], iconAnchor: [7, 7] })
+    }).addTo(map);
+    document.getElementById('instructions').innerHTML =
+      '<strong>Road Racer</strong><br>Now click to set the <span style="color:#e63946">end point</span>.';
+  } else if (!endPoint) {
+    endPoint = e.latlng;
+    endMarker = L.marker(e.latlng, {
+      icon: L.divIcon({ className: 'marker-end', iconSize: [14, 14], iconAnchor: [7, 7] })
+    }).addTo(map);
+    document.getElementById('instructions').innerHTML =
+      '<strong>Road Racer</strong><br>Fetching route...';
+    fetchRoute();
+  }
+});
+
+// ==================== ROUTE FETCHING ====================
+async function fetchRoute() {
+  const url = `https://router.project-osrm.org/route/v1/driving/` +
+    `${startPoint.lng},${startPoint.lat};${endPoint.lng},${endPoint.lat}` +
+    `?overview=full&geometries=geojson`;
+
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.code !== 'Ok' || !data.routes.length) {
+      document.getElementById('instructions').innerHTML =
+        '<strong>No route found!</strong><br>Try different points. Click to set a new start.';
+      resetPicking();
+      return;
+    }
+
+    routeCoords = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]); // [lat, lng]
+    routeLine = L.polyline(routeCoords, { color: '#e63946', weight: 6, opacity: 0.8 }).addTo(map);
+    map.fitBounds(routeLine.getBounds(), { padding: [60, 60] });
+
+    state = 'ready';
+    document.getElementById('instructions').innerHTML =
+      '<strong>Route found!</strong><br>Click START RACE to begin.';
+    document.getElementById('start-race-btn').style.display = 'block';
+  } catch (err) {
+    document.getElementById('instructions').innerHTML =
+      '<strong>Network error!</strong><br>Try again. Click to set a new start.';
+    resetPicking();
+  }
+}
+
+function resetPicking() {
+  startPoint = null; endPoint = null;
+  if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+  if (endMarker) { map.removeLayer(endMarker); endMarker = null; }
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  state = 'picking';
+}
+
+// ==================== COORDINATE CONVERSION ====================
+function latLngToMeters(lat, lng, refLat, refLng) {
+  const R = 6371000;
+  const dLat = (lat - refLat) * Math.PI / 180;
+  const dLng = (lng - refLng) * Math.PI / 180;
+  const x = dLng * R * Math.cos(refLat * Math.PI / 180);
+  const y = -dLat * R; // flip Y so north is up in screen coords
+  return { x, y };
+}
+
+function buildTrack() {
+  const refLat = routeCoords[0][0];
+  const refLng = routeCoords[0][1];
+  trackPoints = routeCoords.map(([lat, lng]) => latLngToMeters(lat, lng, refLat, refLng));
+
+  // Smooth the track by interpolating if segments are too long
+  const smoothed = [trackPoints[0]];
+  for (let i = 1; i < trackPoints.length; i++) {
+    const prev = smoothed[smoothed.length - 1];
+    const curr = trackPoints[i];
+    const dx = curr.x - prev.x;
+    const dy = curr.y - prev.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 5) {
+      const steps = Math.ceil(dist / 5);
+      for (let s = 1; s <= steps; s++) {
+        smoothed.push({ x: prev.x + dx * s / steps, y: prev.y + dy * s / steps });
+      }
+    } else {
+      smoothed.push(curr);
+    }
+  }
+  trackPoints = smoothed;
+}
+
+// ==================== GAME START ====================
+document.getElementById('start-race-btn').addEventListener('click', startRace);
+
+function startRace() {
+  buildTrack();
+
+  // Init car at start
+  car.x = trackPoints[0].x;
+  car.y = trackPoints[0].y;
+  car.speed = 0;
+  car.steer = 0;
+  carProgress = 0;
+
+  // Point car toward second point
+  if (trackPoints.length > 1) {
+    const dx = trackPoints[1].x - trackPoints[0].x;
+    const dy = trackPoints[1].y - trackPoints[0].y;
+    car.angle = Math.atan2(dy, dx);
+  }
+
+  // Switch to game view
+  document.getElementById('map').style.display = 'none';
+  const canvas = document.getElementById('game-canvas');
+  canvas.style.display = 'block';
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+
+  document.getElementById('instructions').style.display = 'none';
+  document.getElementById('start-race-btn').style.display = 'none';
+  document.getElementById('hud').style.display = 'block';
+  document.getElementById('reset-btn').style.display = 'block';
+  document.getElementById('minimap').style.display = 'block';
+
+  // Setup minimap canvas
+  const mm = document.querySelector('#minimap canvas');
+  mm.width = 180; mm.height = 180;
+
+  state = 'racing';
+  raceStartTime = performance.now();
+  raceTime = 0;
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ==================== INPUT ====================
+window.addEventListener('keydown', e => { keys[e.code] = true; });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ==================== PHYSICS ====================
+const PHYSICS = {
+  accel: 60,        // m/s²
+  brake: 80,        // m/s²
+  drag: 0.5,        // air resistance factor
+  friction: 12,     // base friction
+  maxSpeed: 200,    // km/h → converted in use
+  steerSpeed: 2.8,  // rad/s
+  steerReturn: 4,   // rad/s return to center
+  maxSteer: 0.04,   // rad per frame at speed
+  trackWidth: 18,   // meters — road width
+};
+
+function updateCar(dt) {
+  // Steering
+  const speedFactor = Math.min(car.speed / 10, 1);
+  const steerAmount = PHYSICS.steerSpeed * dt * speedFactor;
+
+  if (keys['ArrowLeft'] || keys['KeyA']) {
+    car.steer -= steerAmount;
+  } else if (keys['ArrowRight'] || keys['KeyD']) {
+    car.steer += steerAmount;
+  } else {
+    // Return to center
+    if (Math.abs(car.steer) < PHYSICS.steerReturn * dt) car.steer = 0;
+    else car.steer -= Math.sign(car.steer) * PHYSICS.steerReturn * dt;
+  }
+  car.steer = Math.max(-1, Math.min(1, car.steer));
+
+  // Acceleration / braking
+  if (keys['ArrowUp'] || keys['KeyW']) {
+    car.speed += PHYSICS.accel * dt;
+  }
+  if (keys['ArrowDown'] || keys['KeyS']) {
+    car.speed -= PHYSICS.brake * dt;
+  }
+
+  // Friction & drag
+  car.speed -= car.speed * PHYSICS.drag * dt;
+  if (Math.abs(car.speed) < 0.1) car.speed = 0;
+
+  const maxSpeedMs = PHYSICS.maxSpeed / 3.6;
+  car.speed = Math.max(-maxSpeedMs * 0.3, Math.min(maxSpeedMs, car.speed));
+
+  // Apply steering to angle
+  car.angle += car.steer * (car.speed / maxSpeedMs) * 3.5 * dt;
+
+  // Move
+  car.x += Math.cos(car.angle) * car.speed * dt;
+  car.y += Math.sin(car.angle) * car.speed * dt;
+
+  // Check if on track & apply off-road penalty
+  const onTrack = isOnTrack(car.x, car.y);
+  if (!onTrack) {
+    car.speed *= (1 - 3 * dt); // slow down off-road
+  }
+
+  // Update progress
+  updateProgress();
+}
+
+function isOnTrack(x, y) {
+  const halfW = PHYSICS.trackWidth / 2;
+  // Check against nearby segments
+  const searchRadius = 100;
+  for (let i = Math.max(0, carProgress - searchRadius); i < Math.min(trackPoints.length - 1, carProgress + searchRadius); i++) {
+    const a = trackPoints[i];
+    const b = trackPoints[i + 1];
+    const dist = pointToSegmentDist(x, y, a.x, a.y, b.x, b.y);
+    if (dist < halfW) return true;
+  }
+  return false;
+}
+
+function pointToSegmentDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.sqrt((px - ax) ** 2 + (py - ay) ** 2);
+  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const projX = ax + t * dx, projY = ay + t * dy;
+  return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
+}
+
+function updateProgress() {
+  // Find closest track point ahead
+  let bestDist = Infinity;
+  let bestIdx = carProgress;
+  const search = Math.min(trackPoints.length, carProgress + 200);
+  for (let i = Math.max(0, carProgress - 10); i < search; i++) {
+    const dx = car.x - trackPoints[i].x;
+    const dy = car.y - trackPoints[i].y;
+    const d = dx * dx + dy * dy;
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  if (bestIdx > carProgress) carProgress = bestIdx;
+
+  // Check finish
+  if (carProgress >= trackPoints.length - 20) {
+    const end = trackPoints[trackPoints.length - 1];
+    const dx = car.x - end.x;
+    const dy = car.y - end.y;
+    if (Math.sqrt(dx * dx + dy * dy) < PHYSICS.trackWidth) {
+      finishRace();
+    }
+  }
+}
+
+function finishRace() {
+  state = 'finished';
+  const screen = document.getElementById('finish-screen');
+  screen.style.display = 'block';
+  screen.querySelector('.time').textContent = formatTime(raceTime);
+}
+
+// ==================== RENDERING ====================
+function gameLoop(timestamp) {
+  if (state !== 'racing') return;
+
+  const dt = Math.min(1 / 30, 1 / 60); // fixed timestep
+  raceTime = (performance.now() - raceStartTime) / 1000;
+
+  updateCar(dt);
+  render();
+  updateHUD();
+  renderMinimap();
+
+  requestAnimationFrame(gameLoop);
+}
+
+function render() {
+  const canvas = document.getElementById('game-canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Camera follows car
+  const camX = car.x;
+  const camY = car.y;
+  const zoom = 4; // pixels per meter
+
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(zoom, zoom);
+  ctx.translate(-camX, -camY);
+
+  // Draw grass background
+  ctx.fillStyle = '#2d5016';
+  ctx.fillRect(camX - W / zoom, camY - H / zoom, W * 2 / zoom, H * 2 / zoom);
+
+  // Draw track
+  drawTrack(ctx);
+
+  // Draw start/finish lines
+  drawStartFinish(ctx);
+
+  // Draw car
+  drawCar(ctx);
+
+  ctx.restore();
+}
+
+function drawTrack(ctx) {
+  const halfW = PHYSICS.trackWidth / 2;
+
+  // Road surface
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = PHYSICS.trackWidth;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(trackPoints[0].x, trackPoints[0].y);
+  for (let i = 1; i < trackPoints.length; i++) {
+    ctx.lineTo(trackPoints[i].x, trackPoints[i].y);
+  }
+  ctx.stroke();
+
+  // Road edge lines (white dashes)
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 0.3;
+  ctx.setLineDash([2, 3]);
+
+  // Left edge
+  drawOffsetPath(ctx, -halfW + 0.5);
+  // Right edge
+  drawOffsetPath(ctx, halfW - 0.5);
+
+  // Center dashes (yellow)
+  ctx.strokeStyle = '#fc0';
+  ctx.lineWidth = 0.2;
+  ctx.setLineDash([2, 4]);
+  drawOffsetPath(ctx, 0);
+
+  ctx.setLineDash([]);
+}
+
+function drawOffsetPath(ctx, offset) {
+  ctx.beginPath();
+  for (let i = 0; i < trackPoints.length; i++) {
+    const prev = trackPoints[Math.max(0, i - 1)];
+    const next = trackPoints[Math.min(trackPoints.length - 1, i + 1)];
+    const dx = next.x - prev.x;
+    const dy = next.y - prev.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    // Perpendicular
+    const nx = -dy / len * offset;
+    const ny = dx / len * offset;
+    const p = trackPoints[i];
+    if (i === 0) ctx.moveTo(p.x + nx, p.y + ny);
+    else ctx.lineTo(p.x + nx, p.y + ny);
+  }
+  ctx.stroke();
+}
+
+function drawStartFinish(ctx) {
+  // Start line (green)
+  if (trackPoints.length > 1) {
+    drawCheckeredLine(ctx, trackPoints[0], trackPoints[1], '#22c55e');
+    // Finish line (red)
+    const last = trackPoints[trackPoints.length - 1];
+    const prev = trackPoints[trackPoints.length - 2];
+    drawCheckeredLine(ctx, last, prev, '#e63946');
+  }
+}
+
+function drawCheckeredLine(ctx, point, nextPoint, color) {
+  const dx = nextPoint.x - point.x;
+  const dy = nextPoint.y - point.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const halfW = PHYSICS.trackWidth / 2;
+  const nx = -dy / len, ny = dx / len;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(point.x + nx * halfW, point.y + ny * halfW);
+  ctx.lineTo(point.x - nx * halfW, point.y - ny * halfW);
+  ctx.stroke();
+}
+
+function drawCar(ctx) {
+  ctx.save();
+  ctx.translate(car.x, car.y);
+  ctx.rotate(car.angle);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(-car.length / 2 + 0.5, -car.width / 2 + 0.5, car.length, car.width);
+
+  // Body
+  ctx.fillStyle = '#e63946';
+  ctx.fillRect(-car.length / 2, -car.width / 2, car.length, car.width);
+
+  // Windshield
+  ctx.fillStyle = '#89c2d9';
+  ctx.fillRect(car.length / 2 - 3, -car.width / 2 + 0.8, 1.5, car.width - 1.6);
+
+  // Front accent
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(car.length / 2 - 0.5, -car.width / 2 + 0.3, 0.5, 1);
+  ctx.fillRect(car.length / 2 - 0.5, car.width / 2 - 1.3, 0.5, 1);
+
+  ctx.restore();
+}
+
+// ==================== HUD ====================
+function updateHUD() {
+  const speedKmh = Math.abs(car.speed * 3.6).toFixed(0);
+  document.querySelector('#hud .speed').innerHTML =
+    `${speedKmh} <span style="font-size:14px;color:#999">km/h</span>`;
+  document.querySelector('#hud .time-display').textContent = formatTime(raceTime);
+  const pct = Math.min(100, (carProgress / (trackPoints.length - 1) * 100)).toFixed(0);
+  document.querySelector('#hud .progress-display').textContent = `${pct}%`;
+}
+
+function formatTime(t) {
+  const mins = Math.floor(t / 60);
+  const secs = (t % 60).toFixed(1);
+  return `${mins}:${secs.padStart(4, '0')}`;
+}
+
+// ==================== MINIMAP ====================
+function renderMinimap() {
+  const mm = document.querySelector('#minimap canvas');
+  const ctx = mm.getContext('2d');
+  ctx.clearRect(0, 0, 180, 180);
+
+  // Find bounds
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of trackPoints) {
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+  }
+  const pad = 20;
+  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+  const scale = Math.min((180 - pad * 2) / rangeX, (180 - pad * 2) / rangeY);
+  const offX = (180 - rangeX * scale) / 2;
+  const offY = (180 - rangeY * scale) / 2;
+
+  const toMM = (p) => ({ x: (p.x - minX) * scale + offX, y: (p.y - minY) * scale + offY });
+
+  // Track
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  const first = toMM(trackPoints[0]);
+  ctx.moveTo(first.x, first.y);
+  for (let i = 1; i < trackPoints.length; i += 5) {
+    const p = toMM(trackPoints[i]);
+    ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+
+  // Car dot
+  const cp = toMM(car);
+  ctx.fillStyle = '#e63946';
+  ctx.beginPath();
+  ctx.arc(cp.x, cp.y, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Start/end dots
+  const sp = toMM(trackPoints[0]);
+  ctx.fillStyle = '#22c55e';
+  ctx.beginPath(); ctx.arc(sp.x, sp.y, 3, 0, Math.PI * 2); ctx.fill();
+
+  const ep = toMM(trackPoints[trackPoints.length - 1]);
+  ctx.fillStyle = '#e63946';
+  ctx.beginPath(); ctx.arc(ep.x, ep.y, 3, 0, Math.PI * 2); ctx.fill();
+}
+
+// ==================== RESET ====================
+document.getElementById('reset-btn').addEventListener('click', resetGame);
+
+function resetGame() {
+  state = 'picking';
+  startPoint = null; endPoint = null;
+  routeCoords = []; trackPoints = [];
+  carProgress = 0;
+
+  if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+  if (endMarker) { map.removeLayer(endMarker); endMarker = null; }
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+
+  document.getElementById('map').style.display = 'block';
+  document.getElementById('game-canvas').style.display = 'none';
+  document.getElementById('hud').style.display = 'none';
+  document.getElementById('reset-btn').style.display = 'none';
+  document.getElementById('minimap').style.display = 'none';
+  document.getElementById('finish-screen').style.display = 'none';
+  document.getElementById('start-race-btn').style.display = 'none';
+  document.getElementById('instructions').style.display = 'block';
+  document.getElementById('instructions').innerHTML =
+    '<strong>Road Racer</strong><br>Click on the map to set a <span style="color:#22c55e">start point</span>, then click again for an <span style="color:#e63946">end point</span>. The roads between them become your race track!';
+}
+
+// Handle resize
+window.addEventListener('resize', () => {
+  const canvas = document.getElementById('game-canvas');
+  if (canvas.style.display !== 'none') {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+});
+</script>
+</body>
+</html>

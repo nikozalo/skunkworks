@@ -1,0 +1,9 @@
+[submodule "mkr-sky-fee-stepper/lib/forge-std"]
+	path = mkr-sky-fee-stepper/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "mkr-sky-fee-stepper/lib/dss-test"]
+	path = mkr-sky-fee-stepper/lib/dss-test
+	url = https://github.com/makerdao/dss-test
+[submodule "mkr-sky-fee-stepper/lib/sky"]
+	path = mkr-sky-fee-stepper/lib/sky
+	url = https://github.com/sky-ecosystem/sky

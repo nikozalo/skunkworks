@@ -1,0 +1,6 @@
+forge-std/=lib/forge-std/src/
+dss-test/=lib/dss-test/src/
+dss-interfaces/=lib/dss-test/lib/dss-interfaces/src/
+sky/=lib/sky/src/
+src/=src/
+deploy/=deploy/
